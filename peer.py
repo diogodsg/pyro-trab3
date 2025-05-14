@@ -25,8 +25,18 @@ class Peer:
     def adicionar_arquivo(self, nome_arquivo):
         if nome_arquivo not in self.arquivos:
             self.arquivos.append(nome_arquivo)
-        if self.e_tracker:
-            print(f"[{self.nome}] Atualizando índice com novo arquivo: {nome_arquivo}")
+
+            if self.e_tracker:
+                print(f"[{self.nome}] Atualizando índice com novo arquivo: {nome_arquivo}")
+                # aqui você pode atualizar um dicionário de índice local se quiser
+            elif self.tracker_uri:
+                try:
+                    tracker = Pyro5.api.Proxy(self.tracker_uri)
+                    tracker.receber_arquivo(self.nome, nome_arquivo)
+                    print(f"[{self.nome}] Avisou o tracker sobre novo arquivo: {nome_arquivo}")
+                except Exception as e:
+                    print(f"[{self.nome}] Erro ao avisar o tracker: {e}")
+
 
     def heartbeat(self):
         self.recebeu_heartbeat = True
@@ -68,6 +78,11 @@ def iniciar_peer(nome_peer):
     arquivos = os.listdir(pasta_arquivos)
 
     peer = Peer(nome_peer, arquivos)
+
+    # Adicionar os arquivos existentes ao peer
+    for arquivo in arquivos:
+        peer.adicionar_arquivo(arquivo)  # Aqui adicionamos os arquivos já existentes
+
     daemon = Pyro5.api.Daemon(host=socket.gethostbyname(socket.gethostname()))
     uri = daemon.register(peer)
 
@@ -77,7 +92,11 @@ def iniciar_peer(nome_peer):
     print(f"[{nome_peer}] URI registrada: {uri}")
     print(f"[{nome_peer}] Rodando...")
 
+    # Monitorar o tracker
     threading.Thread(target=monitorar_tracker, args=(peer,), daemon=True).start()
+    # Monitorar os arquivos
+    threading.Thread(target=monitorar_arquivos, args=(peer, pasta_arquivos), daemon=True).start()
+    
     daemon.requestLoop()
 
 def monitorar_tracker(peer):
@@ -88,6 +107,18 @@ def monitorar_tracker(peer):
             eleger_tracker(peer)
         elif not peer.e_tracker:
             peer.recebeu_heartbeat = False
+
+def monitorar_arquivos(peer, pasta_arquivos):
+    arquivos_anteriores = set(peer.arquivos)
+    while True:
+        time.sleep(1)
+        arquivos_atualizados = set(os.listdir(pasta_arquivos))
+        novos_arquivos = arquivos_atualizados - arquivos_anteriores
+        if novos_arquivos:
+            for novo_arquivo in novos_arquivos:
+                peer.adicionar_arquivo(novo_arquivo)
+                print(f"[{peer.nome}] Novo arquivo detectado e adicionado: {novo_arquivo}")
+            arquivos_anteriores = arquivos_atualizados
 
 def eleger_tracker(peer):
     if peer.em_eleicao:
