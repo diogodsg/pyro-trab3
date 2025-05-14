@@ -16,6 +16,8 @@ class Peer:
         self.votou_na_epoca = set()
         self.recebeu_heartbeat = True
         self.e_tracker = False
+        self.em_eleicao = False
+        self.vivos = {}  # nome_peer -> timestamp do último heartbeat
 
     def listar_arquivos(self):
         return self.arquivos
@@ -28,11 +30,24 @@ class Peer:
 
     def heartbeat(self):
         self.recebeu_heartbeat = True
+        if self.e_tracker:
+            self.vivos[self.nome] = time.time()  # opcional
+        else:
+            # Envia ao tracker
+            try:
+                tracker = Pyro5.api.Proxy(self.tracker_uri)
+                tracker.registrar_heartbeat(self.nome)
+            except:
+                pass
 
     def registrar_tracker(self, uri, epoch):
         self.tracker_uri = uri
         self.epoch = epoch
         print(f"[{self.nome}] Novo tracker registrado: {uri} (época {epoch})")
+
+    def registrar_heartbeat(self, nome_peer):
+        if self.e_tracker:
+            self.vivos[nome_peer] = time.time()
 
     def consultar_arquivo(self, nome_arquivo):
         if self.e_tracker:
@@ -41,7 +56,6 @@ class Peer:
             return resultado
         return None
 
-    # Métodos de eleição (simples, para começar)
     def votar(self, candidato, epoca):
         if epoca not in self.votou_na_epoca:
             self.votou_na_epoca.add(epoca)
@@ -72,39 +86,77 @@ def monitorar_tracker(peer):
         if not peer.recebeu_heartbeat:
             print(f"[{peer.nome}] Tracker ausente. Iniciando eleição...")
             eleger_tracker(peer)
-        peer.recebeu_heartbeat = False
+        elif not peer.e_tracker:
+            peer.recebeu_heartbeat = False
 
 def eleger_tracker(peer):
-    ns = Pyro5.api.locate_ns()
-    peers_disponiveis = [name for name, _ in ns.list().items() if name.startswith("peer")]
+    if peer.em_eleicao:
+        return
+    peer.em_eleicao = True
+    try:
+        ns = Pyro5.api.locate_ns()
 
-    votos = 1  # vota em si mesmo
-    epoca_nova = peer.epoch + 1
-    for outro_nome in peers_disponiveis:
-        if outro_nome == peer.nome:
-            continue
-        try:
-            proxy = Pyro5.api.Proxy(ns.lookup(outro_nome))
-            if proxy.votar(peer.nome, epoca_nova):
-                votos += 1
-        except:
-            continue
+        tempo_limite = time.time() - 0.5
+        peers_disponiveis = []
 
-    if votos > len(peers_disponiveis) // 2:
-        uri = ns.lookup(peer.nome)
-        nome_tracker = f"Tracker_Epoca_{epoca_nova}"
-        ns.register(nome_tracker, uri)
-        peer.e_tracker = True
-        peer.epoch = epoca_nova
-        print(f"[{peer.nome}] Foi eleito como novo TRACKER ({nome_tracker}) com {votos} votos")
-        threading.Thread(target=enviar_heartbeat, args=(peer,), daemon=True).start()
-    else:
-        print(f"[{peer.nome}] Eleição falhou ({votos} votos)")
+        # Tenta filtrar peers que respondem ao heartbeat
+        for nome, uri in ns.list().items():
+            if nome.startswith("peer"):
+                try:
+                    proxy = Pyro5.api.Proxy(uri)
+                    proxy._pyroTimeout = 0.2
+                    proxy.heartbeat()
+                    peers_disponiveis.append(nome)
+                except:
+                    continue
+
+        votos = 1  # vota em si mesmo
+        epoca_nova = peer.epoch + 1
+        for outro_nome in peers_disponiveis:
+            if outro_nome == peer.nome:
+                continue
+            try:
+                proxy = Pyro5.api.Proxy(ns.lookup(outro_nome))
+                if proxy.votar(peer.nome, epoca_nova):
+                    votos += 1
+            except:
+                continue
+
+        if votos >= (len(peers_disponiveis) + 1) // 2:
+            uri = ns.lookup(peer.nome)
+
+            # Remover trackers antigos
+            for name in ns.list().keys():
+                if name.startswith("Tracker_Epoca_"):
+                    try:
+                        ns.remove(name)
+                    except:
+                        pass
+
+            nome_tracker = f"Tracker_Epoca_{epoca_nova}"
+            ns.register(nome_tracker, uri)
+
+            peer.e_tracker = True
+            peer.epoch = epoca_nova
+            print(f"[{peer.nome}] Foi eleito como novo TRACKER ({nome_tracker}) com {votos} votos")
+
+            threading.Thread(target=enviar_heartbeat, args=(peer,), daemon=True).start()
+        else:
+            print(f"[{peer.nome}] Eleição falhou ({votos} votos)")
+    finally:
+        peer.em_eleicao = False
 
 def enviar_heartbeat(peer):
     ns = Pyro5.api.locate_ns()
     while peer.e_tracker:
         time.sleep(0.1)
+
+        # Remove peers inativos (>5s)
+        agora = time.time()
+        for peer_name in list(peer.vivos):
+            if agora - peer.vivos[peer_name] > 5:
+                del peer.vivos[peer_name]
+
         for nome, uri in ns.list().items():
             if nome.startswith("peer"):
                 try:
@@ -112,7 +164,6 @@ def enviar_heartbeat(peer):
                     proxy.heartbeat()
                 except:
                     continue
-
 
 if __name__ == "__main__":
     import sys
