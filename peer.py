@@ -10,6 +10,7 @@ import socket
 class Peer:
     def __init__(self, nome, arquivos):
         self.nome = nome
+        self.uri =''
         self.arquivos = arquivos
         self.tracker_uri = None
         self.epoch = 0
@@ -18,9 +19,22 @@ class Peer:
         self.e_tracker = False
         self.em_eleicao = False
         self.vivos = {}  # nome_peer -> timestamp do último heartbeat
+        self.indice = {}
+        self.pasta_arquivos = os.path.join("arquivos", nome)
 
-    def listar_arquivos(self):
-        return self.arquivos
+
+    def localizar_arquivo(self, arquivo: str):
+        nos_com_arquivo = []
+        for peer in self.indice.keys():
+            if arquivo in self.indice[peer]:
+                nos_com_arquivo.append(peer)
+                continue
+        return nos_com_arquivo
+    
+    def receber_arquivos(self, nome_peer: str, arquivos: list[str]):
+        print(f"Arquivos recebidos de [{nome_peer}]: {arquivos}")
+        self.indice[nome_peer] = arquivos
+
 
     def adicionar_arquivo(self, nome_arquivo):
         if nome_arquivo not in self.arquivos:
@@ -29,16 +43,24 @@ class Peer:
             if self.e_tracker:
                 print(f"[{self.nome}] Atualizando índice com novo arquivo: {nome_arquivo}")
                 # aqui você pode atualizar um dicionário de índice local se quiser
-            elif self.tracker_uri:
+            elif self.tracker_uri and self.tracker_uri != self.uri:
                 try:
                     tracker = Pyro5.api.Proxy(self.tracker_uri)
-                    tracker.receber_arquivo(self.nome, nome_arquivo)
+                    tracker.receber_arquivos(self.nome, self.arquivos)
+                    
                     print(f"[{self.nome}] Avisou o tracker sobre novo arquivo: {nome_arquivo}")
                 except Exception as e:
                     print(f"[{self.nome}] Erro ao avisar o tracker: {e}")
 
 
-    def heartbeat(self):
+    def heartbeat(self, uri, epoch: int):
+        if not self.tracker_uri:
+            self.tracker_uri = uri 
+            if self.tracker_uri != self.uri:
+                tracker = Pyro5.api.Proxy(self.tracker_uri)
+                tracker.receber_arquivos(self.nome, self.arquivos)
+        if epoch >= self.epoch:
+            self.epoch = epoch
         self.recebeu_heartbeat = True
         if self.e_tracker:
             self.vivos[self.nome] = time.time()  # opcional
@@ -55,22 +77,42 @@ class Peer:
         self.epoch = epoch
         print(f"[{self.nome}] Novo tracker registrado: {uri} (época {epoch})")
 
+        proxy = Pyro5.api.Proxy(self.tracker_uri)
+        proxy.receber_arquivos(self.nome, self.arquivos)
+
     def registrar_heartbeat(self, nome_peer):
         if self.e_tracker:
             self.vivos[nome_peer] = time.time()
 
-    def consultar_arquivo(self, nome_arquivo):
-        if self.e_tracker:
-            resultado = [p for p, lista in self.indice.items() if nome_arquivo in lista]
-            print(f"[TRACKER {self.nome}] Consulta: '{nome_arquivo}' encontrado em: {resultado}")
-            return resultado
-        return None
+    def baixar_arquivo(self, nome_arquivo):
+        caminho = os.path.join(self.pasta_arquivos, nome_arquivo)
+        print(caminho)
+        if not os.path.exists(caminho):
+            return f"Erro: arquivo '{nome_arquivo}' não encontrado."
+
+        with open(caminho, "rb") as f:
+            conteudo = f.read()
+        
+        return conteudo  # será enviado como bytes via Pyro
+    
+
 
     def votar(self, candidato, epoca):
         if epoca not in self.votou_na_epoca:
             self.votou_na_epoca.add(epoca)
             return True
         return False
+
+def avisar_resultado_eleicao(peer):
+    ns = Pyro5.api.locate_ns()
+
+    for nome, uri in ns.list().items():
+        if nome.startswith("peer") and nome != peer.nome:
+            try:
+                proxy = Pyro5.api.Proxy(uri)
+                proxy.registrar_tracker(peer.uri, peer.epoch)
+            except:
+                continue
 
 def iniciar_peer(nome_peer):
     pasta_arquivos = os.path.join("arquivos", nome_peer)
@@ -88,7 +130,7 @@ def iniciar_peer(nome_peer):
 
     ns = Pyro5.api.locate_ns()
     ns.register(nome_peer, uri)
-
+    peer.uri = uri
     print(f"[{nome_peer}] URI registrada: {uri}")
     print(f"[{nome_peer}] Rodando...")
 
@@ -121,6 +163,7 @@ def monitorar_arquivos(peer, pasta_arquivos):
             arquivos_anteriores = arquivos_atualizados
 
 def eleger_tracker(peer):
+    print('eleger tracker', peer.epoch)
     if peer.em_eleicao:
         return
     peer.em_eleicao = True
@@ -143,6 +186,7 @@ def eleger_tracker(peer):
 
         votos = 1  # vota em si mesmo
         epoca_nova = peer.epoch + 1
+        print(epoca_nova)
         for outro_nome in peers_disponiveis:
             if outro_nome == peer.nome:
                 continue
@@ -170,8 +214,9 @@ def eleger_tracker(peer):
             peer.e_tracker = True
             peer.epoch = epoca_nova
             print(f"[{peer.nome}] Foi eleito como novo TRACKER ({nome_tracker}) com {votos} votos")
-
+            
             threading.Thread(target=enviar_heartbeat, args=(peer,), daemon=True).start()
+            avisar_resultado_eleicao(peer=peer)
         else:
             print(f"[{peer.nome}] Eleição falhou ({votos} votos)")
     finally:
@@ -192,7 +237,7 @@ def enviar_heartbeat(peer):
             if nome.startswith("peer"):
                 try:
                     proxy = Pyro5.api.Proxy(uri)
-                    proxy.heartbeat()
+                    proxy.heartbeat(peer.uri,peer.epoch)
                 except:
                     continue
 
