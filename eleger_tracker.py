@@ -1,5 +1,6 @@
 import re
 import Pyro5.api
+import math
 class ElegerTracker:
 
             
@@ -22,7 +23,8 @@ class ElegerTracker:
             self.votos = self.coletar_votos()
 
             print(f"[{peer.nome}] Votos coletados: {self.votos} de {len(self.peers_disponiveis)} peers disponíveis")
-            if self.votos >= (len(self.peers_disponiveis) + 1) // 2:
+            print( math.ceil((len(self.peers_disponiveis)) / 2))
+            if self.votos >= math.ceil((len(self.peers_disponiveis) + 1) / 2):
                 self.cleanup_old_trackers()
                 uri = self.ns.lookup(peer.nome)
 
@@ -57,7 +59,7 @@ class ElegerTracker:
         votos = self.votos
         for peer in self.peers_disponiveis:
             if peer == self.peer.nome:
-                print(f"[{self.peer.nome}] Votou em si mesmo")
+                self.peer.votar(self.epoch)
                 continue
             try:
                 proxy = Pyro5.api.Proxy(self.ns.lookup(peer))

@@ -34,6 +34,8 @@ def get_tracker():
         return None
 
 def requisitar_arquivo(nome_arquivo):
+    ns = Pyro5.api.locate_ns()
+
     try:
         tracker = get_tracker()
         peers = tracker.localizar_arquivo(nome_arquivo)
